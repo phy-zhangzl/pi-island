@@ -27,15 +27,32 @@ struct SessionSnapshot: Identifiable, Equatable {
     }
 }
 
+struct RecentSessionMetadata: Equatable {
+    let id: String
+    let workspaceName: String
+    let name: String
+    let cwd: String
+    let modifiedAt: TimeInterval
+}
+
 enum SessionDiscovery {
-    static func scanAllSessions(debug: (String) -> Void = { _ in }) -> [SessionSnapshot] {
+    private struct RecentCacheEntry {
+        let modifiedAt: TimeInterval
+        let metadata: RecentSessionMetadata
+    }
+
+    private static let recentCacheLock = NSLock()
+    private static var recentCache: [String: RecentCacheEntry] = [:]
+    private static let maxReadBytes = 16 * 1024
+
+    static func mostRecentSession(modifiedWithin seconds: TimeInterval = 10, debug: (String) -> Void = { _ in }) -> RecentSessionMetadata? {
         let root = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".pi/agent/sessions", isDirectory: true)
         let fm = FileManager.default
 
         var isDirectory: ObjCBool = false
         guard fm.fileExists(atPath: root.path, isDirectory: &isDirectory), isDirectory.boolValue else {
             debug("[SessionDiscovery] sessions root missing: \(root.path)")
-            return []
+            return nil
         }
 
         let workspaceDirectories = (try? fm.contentsOfDirectory(
@@ -44,94 +61,93 @@ enum SessionDiscovery {
             options: [.skipsHiddenFiles]
         )) ?? []
 
-        let sessionFiles = workspaceDirectories.flatMap { directoryURL -> [URL] in
+        let now = Date().timeIntervalSince1970
+        var bestURL: URL?
+        var bestModifiedAt: TimeInterval = 0
+
+        for directoryURL in workspaceDirectories {
             let values = try? directoryURL.resourceValues(forKeys: [.isDirectoryKey])
-            guard values?.isDirectory == true else { return [] }
-            return (try? fm.contentsOfDirectory(
+            guard values?.isDirectory == true else { continue }
+
+            let files = (try? fm.contentsOfDirectory(
                 at: directoryURL,
                 includingPropertiesForKeys: [.contentModificationDateKey],
                 options: [.skipsHiddenFiles]
             )) ?? []
-        }
-        .filter { $0.pathExtension == "jsonl" }
 
-        var snapshotsByID: [String: SessionSnapshot] = [:]
-        for fileURL in sessionFiles {
-            guard let snapshot = parseSnapshot(from: fileURL, debug: debug) else { continue }
-
-            if let existing = snapshotsByID[snapshot.id] {
-                if snapshot.modifiedAt > existing.modifiedAt {
-                    snapshotsByID[snapshot.id] = snapshot
+            for fileURL in files where fileURL.pathExtension == "jsonl" {
+                let modifiedAt = ((try? fileURL.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast).timeIntervalSince1970
+                guard now - modifiedAt <= seconds else { continue }
+                if modifiedAt > bestModifiedAt {
+                    bestModifiedAt = modifiedAt
+                    bestURL = fileURL
                 }
-            } else {
-                snapshotsByID[snapshot.id] = snapshot
             }
         }
 
-        return snapshotsByID.values.sorted { lhs, rhs in
-            if lhs.modifiedAt == rhs.modifiedAt {
-                return lhs.id < rhs.id
-            }
-            return lhs.modifiedAt > rhs.modifiedAt
-        }
+        guard let fileURL = bestURL else { return nil }
+        return metadata(for: fileURL, modifiedAt: bestModifiedAt, debug: debug)
     }
 
-    private static func parseSnapshot(from fileURL: URL, debug: (String) -> Void) -> SessionSnapshot? {
-        let modifiedAt = ((try? fileURL.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? Date()).timeIntervalSince1970
-
-        guard let content = try? String(contentsOf: fileURL, encoding: .utf8) else {
-            debug("[SessionDiscovery] unreadable session file: \(fileURL.path)")
-            return nil
+    private static func metadata(for fileURL: URL, modifiedAt: TimeInterval, debug: (String) -> Void) -> RecentSessionMetadata {
+        let cacheKey = fileURL.path
+        recentCacheLock.lock()
+        if let cached = recentCache[cacheKey], cached.modifiedAt == modifiedAt {
+            recentCacheLock.unlock()
+            return cached.metadata
         }
-
-        let lines = content.split(separator: "\n", omittingEmptySubsequences: true)
-        guard !lines.isEmpty else {
-            debug("[SessionDiscovery] empty session file: \(fileURL.path)")
-            return nil
-        }
-
-        var sessionID: String?
-        var cwd: String?
-        var name: String?
-
-        for line in lines {
-            guard let data = line.data(using: .utf8),
-                  let entry = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let type = entry["type"] as? String else {
-                continue
-            }
-
-            if type == "session" {
-                if let id = entry["id"] as? String, !id.isEmpty {
-                    sessionID = id
-                }
-                if let sessionCWD = entry["cwd"] as? String, !sessionCWD.isEmpty {
-                    cwd = sessionCWD
-                }
-            }
-
-            if type == "session_info" || type == "session" {
-                if let candidate = (entry["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !candidate.isEmpty {
-                    name = candidate
-                }
-            }
-        }
+        recentCacheLock.unlock()
 
         let fallbackCWD = decodedWorkspacePath(from: fileURL) ?? fileURL.deletingLastPathComponent().path
-        let resolvedCWD = cwd ?? fallbackCWD
-        let workspaceName = URL(fileURLWithPath: resolvedCWD).lastPathComponent.isEmpty ? "pi" : URL(fileURLWithPath: resolvedCWD).lastPathComponent
-        let resolvedName = name ?? fileURL.deletingPathExtension().lastPathComponent
-        let identity = sessionID.map { "pi:\($0)" } ?? "pi-file:\(fileURL.path)"
+        let fallbackName = fileURL.deletingPathExtension().lastPathComponent
+        var resolvedCWD = fallbackCWD
+        var resolvedName = fallbackName
 
-        return SessionSnapshot(
-            id: identity,
-            sessionID: sessionID,
-            name: resolvedName,
+        if let prefix = readPrefix(from: fileURL, maxBytes: maxReadBytes) {
+            let lines = prefix.split(separator: "\n", omittingEmptySubsequences: true)
+            for line in lines {
+                guard let data = line.data(using: .utf8),
+                      let entry = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let type = entry["type"] as? String else {
+                    continue
+                }
+
+                if type == "session", let candidate = entry["cwd"] as? String, !candidate.isEmpty {
+                    resolvedCWD = candidate
+                }
+
+                if (type == "session_info" || type == "session"),
+                   let candidate = (entry["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                   !candidate.isEmpty {
+                    resolvedName = candidate
+                    break
+                }
+            }
+        } else {
+            debug("[SessionDiscovery] unreadable fallback session file: \(fileURL.path)")
+        }
+
+        let workspaceName = URL(fileURLWithPath: resolvedCWD).lastPathComponent.isEmpty ? "pi" : URL(fileURLWithPath: resolvedCWD).lastPathComponent
+        let metadata = RecentSessionMetadata(
+            id: "pi-file:\(fileURL.path)",
             workspaceName: workspaceName,
+            name: resolvedName,
             cwd: resolvedCWD,
-            modifiedAt: modifiedAt,
-            fileURL: fileURL
+            modifiedAt: modifiedAt
         )
+
+        recentCacheLock.lock()
+        recentCache[cacheKey] = RecentCacheEntry(modifiedAt: modifiedAt, metadata: metadata)
+        recentCacheLock.unlock()
+        return metadata
+    }
+
+    private static func readPrefix(from fileURL: URL, maxBytes: Int) -> String? {
+        guard let handle = try? FileHandle(forReadingFrom: fileURL) else { return nil }
+        defer { try? handle.close() }
+        let data = try? handle.read(upToCount: maxBytes)
+        guard let data, !data.isEmpty else { return nil }
+        return String(decoding: data, as: UTF8.self)
     }
 
     private static func decodedWorkspacePath(from fileURL: URL) -> String? {

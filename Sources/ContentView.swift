@@ -105,9 +105,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var activeSessionCount = 0
     @Published private(set) var detectedSessions: [AgentSession] = []
 
-    private var sessionSnapshots: [SessionSnapshot] = []
-    private let sessionScanInterval: TimeInterval = 3
-    private var lastSessionScanAt: TimeInterval = 0
+    private let eventLogQueue = DispatchQueue(label: "vibe-island.event-log", qos: .utility)
 
     private var collapseWorkItem: DispatchWorkItem?
     private var hoverExpandWorkItem: DispatchWorkItem?
@@ -134,12 +132,11 @@ final class AppModel: ObservableObject {
         )
         self.sessions = [seed]
         self.selectedSessionID = seed.id
-        refreshDiscoveredSessions(force: true)
         refreshCountsAndSelection()
     }
 
     var mergedSessions: [AgentSession] {
-        mergeSessions(realSessions: sessions.filter { $0.id != "mock-chatbot" }, snapshots: sessionSnapshots)
+        sessions.filter { $0.id != "mock-chatbot" }.sorted { $0.updatedAt > $1.updatedAt }
     }
 
     var shouldShowExpanded: Bool {
@@ -163,18 +160,7 @@ final class AppModel: ObservableObject {
     func apply(_ payload: PiEventPayload) {
         let identity = sessionIdentity(for: payload)
         let logLine = "[VibeIsland] event: \(payload.projectName)/\(payload.sessionName ?? payload.projectName) \(payload.state.rawValue) [id=\(identity)] \(payload.detail ?? "")\n"
-        if let data = logLine.data(using: .utf8) {
-            let url = URL(fileURLWithPath: "/tmp/vibeisland-events.log")
-            if FileManager.default.fileExists(atPath: url.path) {
-                if let handle = try? FileHandle(forWritingTo: url) {
-                    _ = try? handle.seekToEnd()
-                    try? handle.write(contentsOf: data)
-                    try? handle.close()
-                }
-            } else {
-                try? data.write(to: url)
-            }
-        }
+        appendEventLog(logLine)
 
         let detail = payload.detail?.isEmpty == false ? payload.detail! : defaultDetail(for: payload.state)
         let resolvedSessionName = resolvedSessionName(from: payload)
@@ -202,15 +188,16 @@ final class AppModel: ObservableObject {
         sessions.sort { $0.updatedAt > $1.updatedAt }
         selectedSessionID = identity
         lastEventText = "\(payload.projectName) / \(resolvedSessionName) · \(payload.state.title)"
-        refreshDiscoveredSessions(force: false)
         refreshCountsAndSelection()
 
         if payload.state == .idle {
-            isPinnedExpanded = false
             collapseWorkItem?.cancel()
             hoverExpandWorkItem?.cancel()
             hoverCollapseWorkItem?.cancel()
-            setExpandedAnimated(false)
+            if !shouldShowExpanded {
+                isPinnedExpanded = false
+                setExpandedAnimated(false)
+            }
         } else if payload.state == .done || payload.state == .error {
             setExpandedAnimated(true)
             scheduleAutoCollapse(for: payload.state)
@@ -309,7 +296,6 @@ final class AppModel: ObservableObject {
             sessions.sort { $0.updatedAt > $1.updatedAt }
         }
 
-        refreshDiscoveredSessions(force: false)
         refreshCountsAndSelection()
 
         if activeSessionCount == 0, !isHoveringIsland, !isHoveringPanel, !isPinnedExpanded, expanded {
@@ -320,57 +306,12 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func mergeSessions(realSessions: [AgentSession], snapshots: [SessionSnapshot]) -> [AgentSession] {
-        var mergedByID = Dictionary(uniqueKeysWithValues: snapshots.map { ($0.id, snapshotSession(from: $0)) })
-
-        for session in realSessions {
-            if var existing = mergedByID[session.id] {
-                existing.workspaceName = existing.workspaceName.isEmpty ? session.workspaceName : existing.workspaceName
-                existing.name = existing.name.isEmpty || existing.name == "Untitled session" ? session.name : existing.name
-                existing.cwd = existing.cwd.isEmpty ? session.cwd : existing.cwd
-                existing.terminalApp = session.terminalApp ?? existing.terminalApp
-                existing.terminalSessionID = session.terminalSessionID ?? existing.terminalSessionID
-                existing.state = session.state
-                existing.detail = session.detail
-                existing.contextTokens = session.contextTokens
-                existing.contextWindow = session.contextWindow
-                existing.updatedAt = max(existing.updatedAt, session.updatedAt)
-                existing.duration = relativeDuration(from: existing.updatedAt)
-                mergedByID[session.id] = existing
-            } else {
-                var eventOnly = session
-                eventOnly.duration = relativeDuration(from: eventOnly.updatedAt)
-                mergedByID[session.id] = eventOnly
-            }
-        }
-
-        return mergedByID.values.sorted { $0.updatedAt > $1.updatedAt }
-    }
-
-    private func snapshotSession(from snapshot: SessionSnapshot) -> AgentSession {
-        var session = snapshot.agentSession
-        session.duration = relativeDuration(from: snapshot.modifiedAt)
-        return session
-    }
-
-    private func refreshDiscoveredSessions(force: Bool) {
-        let now = Date().timeIntervalSince1970
-        guard force || now - lastSessionScanAt >= sessionScanInterval else { return }
-        lastSessionScanAt = now
-
-        let snapshots = SessionDiscovery.scanAllSessions { message in
-            NSLog("%@", message)
-        }
-
-        guard force || snapshots != sessionSnapshots else { return }
-        sessionSnapshots = snapshots
-        detectedSessions = mergeSessions(realSessions: sessions.filter { $0.id != "mock-chatbot" }, snapshots: snapshots)
-    }
 
     private func refreshCountsAndSelection() {
-        let merged = mergedSessions
-        let nextHasBackgroundPi = !merged.isEmpty
-        let nextActive = merged.filter { $0.state.isLiveActivity }.count
+        let realSessions = sessions.filter { $0.id != "mock-chatbot" }
+        let merged = realSessions.sorted { $0.updatedAt > $1.updatedAt }
+        let nextHasBackgroundPi = !realSessions.isEmpty
+        let nextActive = realSessions.filter { $0.state.isLiveActivity }.count
 
         // Only publish if actually changed — avoids unnecessary SwiftUI diffs
         if hasBackgroundPi != nextHasBackgroundPi {
@@ -393,9 +334,8 @@ final class AppModel: ObservableObject {
             }
         }
 
-        let mergedForUI = mergeSessions(realSessions: sessions.filter { $0.id != "mock-chatbot" }, snapshots: sessionSnapshots)
-        if mergedForUI != detectedSessions {
-            detectedSessions = mergedForUI
+        if merged != detectedSessions {
+            detectedSessions = merged
         }
     }
 
@@ -406,6 +346,22 @@ final class AppModel: ObservableObject {
         // Use a single consistent spring so IslandView.syncVisualState
         // receives one clean onChange instead of competing animation contexts.
         expanded = value
+    }
+
+    private func appendEventLog(_ line: String) {
+        eventLogQueue.async {
+            guard let data = line.data(using: .utf8) else { return }
+            let url = URL(fileURLWithPath: "/tmp/vibeisland-events.log")
+            if FileManager.default.fileExists(atPath: url.path) {
+                if let handle = try? FileHandle(forWritingTo: url) {
+                    defer { try? handle.close() }
+                    _ = try? handle.seekToEnd()
+                    try? handle.write(contentsOf: data)
+                }
+            } else {
+                try? data.write(to: url)
+            }
+        }
     }
 
     private func scheduleAutoCollapse(for state: VibeState) {

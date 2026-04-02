@@ -32,6 +32,7 @@ export default function (pi: ExtensionAPI) {
   let currentContextTokens: number | undefined;
   let currentContextWindow: number | undefined;
   let hadError = false;
+  const sessionNameCache = new Map<string, string>();
 
   function getSessionFile(ctx: any): string | undefined {
     const file = ctx.sessionManager.getSessionFile?.();
@@ -50,15 +51,26 @@ export default function (pi: ExtensionAPI) {
     const sessionFile = getSessionFile(ctx);
     if (!sessionFile) return undefined;
 
+    const cached = sessionNameCache.get(sessionFile);
+    if (cached) return cached;
+
     try {
-      const lines = readFileSync(sessionFile, "utf8").split("\n");
+      const content = readFileSync(sessionFile, "utf8");
+      const lines = content.split("\n");
       for (let i = lines.length - 1; i >= 0; i--) {
         const line = lines[i]?.trim();
         if (!line) continue;
         try {
           const entry = JSON.parse(line);
-          if (entry?.type === "session_info" && typeof entry.name === "string" && entry.name.trim().length > 0) {
-            return entry.name.trim();
+          const candidate =
+            entry?.type === "session_info" || entry?.type === "session"
+              ? typeof entry.name === "string"
+                ? entry.name.trim()
+                : undefined
+              : undefined;
+          if (candidate) {
+            sessionNameCache.set(sessionFile, candidate);
+            return candidate;
           }
         } catch {
           continue;
@@ -72,7 +84,9 @@ export default function (pi: ExtensionAPI) {
   }
 
   function getSessionName(ctx: any): string | undefined {
-    return getSessionNameFromFile(ctx);
+    const sessionFile = getSessionFile(ctx);
+    if (!sessionFile) return undefined;
+    return sessionNameCache.get(sessionFile) ?? getSessionNameFromFile(ctx);
   }
 
   function terminalInfo() {
@@ -186,6 +200,7 @@ export default function (pi: ExtensionAPI) {
     currentContextTokens = undefined;
     currentContextWindow = undefined;
     hadError = false;
+    getSessionName(ctx);
     await setState(ctx, "idle", "Ready");
   });
 
