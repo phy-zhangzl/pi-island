@@ -18,8 +18,9 @@ struct IslandView: View {
     @State private var widthProgress: CGFloat = 0
     @State private var heightProgress: CGFloat = 0
     @State private var visualStateToken: Int = 0
-    @State private var hoverDebounceTask: DispatchWorkItem?
-    private let hoverDebounceInterval: TimeInterval = 0.05
+    @State private var capsuleHoverDebounceTask: DispatchWorkItem?
+    @State private var panelHoverDebounceTask: DispatchWorkItem?
+    private let hoverDebounceInterval: TimeInterval = 0.08
 
     private struct VisualPhaseKey: Equatable {
         let isLiveActivity: Bool
@@ -180,35 +181,34 @@ struct IslandView: View {
         debouncedPanelHover(effectiveHover)
     }
 
-    /// Debounce hover callbacks to avoid rapid on/off flicker when crossing zone boundaries
+    /// Debounce hover exit for capsule — uses its OWN task to avoid conflicts with panel debounce
     private func debouncedIslandHover(_ isHovering: Bool) {
         if isHovering {
-            // Enter immediately — no delay
-            hoverDebounceTask?.cancel()
-            hoverDebounceTask = nil
+            capsuleHoverDebounceTask?.cancel()
+            capsuleHoverDebounceTask = nil
             onIslandHoverChanged(true)
         } else {
-            // Exit with small debounce to allow crossing into adjacent zone
             let task = DispatchWorkItem { [onIslandHoverChanged] in
                 onIslandHoverChanged(false)
             }
-            hoverDebounceTask?.cancel()
-            hoverDebounceTask = task
+            capsuleHoverDebounceTask?.cancel()
+            capsuleHoverDebounceTask = task
             DispatchQueue.main.asyncAfter(deadline: .now() + hoverDebounceInterval, execute: task)
         }
     }
 
+    /// Debounce hover exit for panel — uses its OWN task to avoid conflicts with capsule debounce
     private func debouncedPanelHover(_ isHovering: Bool) {
         if isHovering {
-            hoverDebounceTask?.cancel()
-            hoverDebounceTask = nil
+            panelHoverDebounceTask?.cancel()
+            panelHoverDebounceTask = nil
             onPanelHoverChanged(true)
         } else {
             let task = DispatchWorkItem { [onPanelHoverChanged] in
                 onPanelHoverChanged(false)
             }
-            hoverDebounceTask?.cancel()
-            hoverDebounceTask = task
+            panelHoverDebounceTask?.cancel()
+            panelHoverDebounceTask = task
             DispatchQueue.main.asyncAfter(deadline: .now() + hoverDebounceInterval, execute: task)
         }
     }
