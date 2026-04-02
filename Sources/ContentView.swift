@@ -144,10 +144,10 @@ final class AppModel: ObservableObject {
     }
 
     var visibleSessions: [AgentSession] {
-        let merged = mergedSessions.sorted { $0.updatedAt > $1.updatedAt }
+        let merged = mergedSessions.sorted(by: sessionSort)
         let liveSessions = merged.filter { $0.state.isLiveActivity }
         if !liveSessions.isEmpty {
-            return liveSessions
+            return liveSessions.sorted(by: sessionSort)
         }
 
         if let latestBackgroundPi = merged.first {
@@ -185,8 +185,10 @@ final class AppModel: ObservableObject {
             sessions.insert(session, at: 0)
         }
 
-        sessions.sort { $0.updatedAt > $1.updatedAt }
-        selectedSessionID = identity
+        sessions.sort(by: sessionSort)
+        if !isPinnedExpanded || selectedSessionID == identity {
+            selectedSessionID = identity
+        }
         lastEventText = "\(payload.projectName) / \(resolvedSessionName) · \(payload.state.title)"
         refreshCountsAndSelection()
 
@@ -216,6 +218,15 @@ final class AppModel: ObservableObject {
 
     func togglePinnedExpanded() {
         isPinnedExpanded.toggle()
+        if !isPinnedExpanded {
+            promoteMostRelevantSessionIfNeeded()
+        }
+        syncExpandedWithHoverState()
+    }
+
+    func selectSession(_ id: String) {
+        selectedSessionID = id
+        isPinnedExpanded = true
         syncExpandedWithHoverState()
     }
 
@@ -293,7 +304,7 @@ final class AppModel: ObservableObject {
         }
 
         if changed {
-            sessions.sort { $0.updatedAt > $1.updatedAt }
+            sessions.sort(by: sessionSort)
         }
 
         refreshCountsAndSelection()
@@ -309,7 +320,7 @@ final class AppModel: ObservableObject {
 
     private func refreshCountsAndSelection() {
         let realSessions = sessions.filter { $0.id != "mock-chatbot" }
-        let merged = realSessions.sorted { $0.updatedAt > $1.updatedAt }
+        let merged = realSessions.sorted(by: sessionSort)
         let nextHasBackgroundPi = !realSessions.isEmpty
         let nextActive = realSessions.filter { $0.state.isLiveActivity }.count
 
@@ -321,16 +332,18 @@ final class AppModel: ObservableObject {
             activeSessionCount = nextActive
         }
 
-        // Selection: keep current if valid, else pick first merged, else fallback
+        // Selection: auto-follow the most relevant session unless user pinned the panel.
         let currentValid = merged.contains(where: { $0.id == selectedSessionID })
-        if !currentValid {
-            if let first = merged.first {
+        if isPinnedExpanded, currentValid {
+            // keep pinned selection
+        } else if let first = merged.first {
+            if selectedSessionID != first.id {
                 selectedSessionID = first.id
-            } else {
-                let fallback = sessions.first?.id ?? "mock-chatbot"
-                if selectedSessionID != fallback {
-                    selectedSessionID = fallback
-                }
+            }
+        } else {
+            let fallback = sessions.first?.id ?? "mock-chatbot"
+            if selectedSessionID != fallback {
+                selectedSessionID = fallback
             }
         }
 
@@ -346,6 +359,40 @@ final class AppModel: ObservableObject {
         // Use a single consistent spring so IslandView.syncVisualState
         // receives one clean onChange instead of competing animation contexts.
         expanded = value
+    }
+
+    private func promoteMostRelevantSessionIfNeeded() {
+        let candidate = sessions
+            .filter { $0.id != "mock-chatbot" }
+            .sorted(by: sessionSort)
+            .first?.id
+        if let candidate, selectedSessionID != candidate {
+            selectedSessionID = candidate
+        }
+    }
+
+    private func sessionPriority(for session: AgentSession) -> Int {
+        switch session.state {
+        case .running: return 500
+        case .patching: return 480
+        case .reading: return 440
+        case .thinking: return 400
+        case .error: return 320
+        case .done: return 220
+        case .idle: return 100
+        }
+    }
+
+    private func sessionSort(_ lhs: AgentSession, _ rhs: AgentSession) -> Bool {
+        let lhsPriority = sessionPriority(for: lhs)
+        let rhsPriority = sessionPriority(for: rhs)
+        if lhsPriority != rhsPriority {
+            return lhsPriority > rhsPriority
+        }
+        if lhs.updatedAt != rhs.updatedAt {
+            return lhs.updatedAt > rhs.updatedAt
+        }
+        return lhs.id < rhs.id
     }
 
     private func appendEventLog(_ line: String) {
@@ -446,6 +493,7 @@ struct ContentView: View {
                 layout: layout,
                 hasBackgroundPi: model.hasBackgroundPi,
                 activeSessionCount: model.activeSessionCount,
+                isPinnedExpanded: model.isPinnedExpanded,
                 onIslandHoverChanged: { isHovering in
                     model.setIslandHovering(isHovering)
                 },
@@ -457,7 +505,7 @@ struct ContentView: View {
                 },
                 onSelectSession: { id in
                     withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
-                        model.selectedSessionID = id
+                        model.selectSession(id)
                     }
                 }
             )
