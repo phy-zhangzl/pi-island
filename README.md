@@ -17,13 +17,74 @@ Pi Island sits above the notch and shows real-time status of your pi agent sessi
 - macOS 13+
 - Swift 5.9+
 - MacBook with notch (built-in display)
+- [pi](https://github.com/mariozechner/pi-coding-agent) coding agent
 
-## Build & Run
+## Setup
+
+### 1. Build & Run the overlay
 
 ```bash
 swift build
 .build/debug/PiIsland
 ```
+
+### 2. Install the pi extension
+
+Copy the extension to your project's pi extensions directory:
+
+```bash
+# Per-project (recommended)
+mkdir -p .pi/extensions
+cp extension/pi-island.ts .pi/extensions/
+
+# Or global
+mkdir -p ~/.pi/extensions
+cp extension/pi-island.ts ~/.pi/extensions/
+```
+
+The extension hooks into pi's lifecycle events and sends state updates to the overlay via `http://127.0.0.1:47831/event`.
+
+## Architecture
+
+```
+┌─────────────────────┐     HTTP POST /event     ┌──────────────────┐
+│   pi coding agent   │ ───────────────────────▶  │    Pi Island     │
+│                     │    (port 47831)           │    (overlay)     │
+│  extension/         │                           │                  │
+│   pi-island.ts      │                           │  Sources/*.swift │
+└─────────────────────┘                           └──────────────────┘
+```
+
+### Overlay (Swift)
+
+| File | Purpose |
+|------|---------|
+| `PiIslandApp.swift` | App entry point, event server init |
+| `ContentView.swift` | Root view, AppModel (state management) |
+| `IslandView.swift` | Island UI, animations, pixel art components |
+| `EventServer.swift` | TCP server for pi events |
+| `SessionDiscovery.swift` | Scan `~/.pi/agent/sessions/` |
+| `OverlayPlacement.swift` | Notch geometry & window positioning |
+| `WindowAccessor.swift` | NSWindow configuration (borderless, statusBar level) |
+| `TerminalNavigator.swift` | Terminal focus (placeholder) |
+
+### Extension (TypeScript)
+
+| File | Purpose |
+|------|---------|
+| `extension/pi-island.ts` | Pi extension that sends lifecycle events to the overlay |
+
+#### Events sent by the extension
+
+| pi event | → Island state | Detail |
+|----------|---------------|--------|
+| `session_start` | `idle` | Ready |
+| `agent_start` | `thinking` | Processing request |
+| `tool: read` | `reading` | file path |
+| `tool: bash` | `running` | command |
+| `tool: edit/write` | `patching` | file path |
+| `tool_result (error)` | `error` | Something went wrong |
+| `agent_end` | `done` | Task completed |
 
 ## Event API
 
@@ -45,19 +106,6 @@ Send events to `POST http://127.0.0.1:47831/event`:
 ```
 
 States: `idle`, `thinking`, `reading`, `running`, `patching`, `done`, `error`
-
-## Architecture
-
-| File | Purpose |
-|------|---------|
-| `PiIslandApp.swift` | App entry point, event server init |
-| `ContentView.swift` | Root view, AppModel (state management) |
-| `IslandView.swift` | Island UI, animations, pixel art components |
-| `EventServer.swift` | TCP server for pi events |
-| `SessionDiscovery.swift` | Scan `~/.pi/agent/sessions/` |
-| `OverlayPlacement.swift` | Notch geometry & window positioning |
-| `WindowAccessor.swift` | NSWindow configuration (borderless, statusBar level) |
-| `TerminalNavigator.swift` | Terminal focus (placeholder) |
 
 ## License
 
