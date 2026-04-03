@@ -30,16 +30,16 @@ swift build
 
 ### 2. Install the pi extension
 
-Copy the extension to your project's pi extensions directory:
+Copy the extension to either the project-local or global pi extension directory:
 
 ```bash
-# Per-project (recommended)
+# Per-project
 mkdir -p .pi/extensions
 cp extension/pi-island.ts .pi/extensions/
 
-# Or global
-mkdir -p ~/.pi/extensions
-cp extension/pi-island.ts ~/.pi/extensions/
+# Or global (all projects)
+mkdir -p ~/.pi/agent/extensions
+cp extension/pi-island.ts ~/.pi/agent/extensions/
 ```
 
 The extension hooks into pi's lifecycle events and sends state updates to the overlay via `http://127.0.0.1:47831/event`.
