@@ -108,16 +108,6 @@ struct IslandView: View {
 
                 Color.clear
                     .frame(
-                        width: containerWidth + capsuleHoverHorizontalPadding * 2,
-                        height: layout.compactHeight + capsuleHoverVerticalPadding * 2
-                    )
-                    .contentShape(Rectangle())
-                    .onHover { isHovering in
-                        handleCapsuleHover(isHovering)
-                    }
-
-                Color.clear
-                    .frame(
                         width: max(containerWidth + 24, sharedContentWidth + 24),
                         height: panelHoverBridgeHeight
                     )
@@ -126,7 +116,7 @@ struct IslandView: View {
                     .onHover { isHovering in
                         handlePanelHover(isHovering)
                     }
-                    .allowsHitTesting(expanded || widthProgress > 0.01 || heightProgress > 0.01)
+                    .allowsHitTesting(expanded || heightProgress > 0.01)
 
                 VStack(spacing: 0) {
                     capsuleContent(selectedSession)
@@ -150,7 +140,7 @@ struct IslandView: View {
                         .opacity(panelContentProgress)
                         .offset(y: (1 - panelContentProgress) * -4)
                         .scaleEffect(0.994 + panelContentProgress * 0.006, anchor: .top)
-                        .allowsHitTesting(expanded || heightProgress > 0.001 || widthProgress > 0.01)
+                        .allowsHitTesting(expanded || heightProgress > 0.001)
                 }
                 .frame(width: containerWidth, height: containerHeight, alignment: .top)
             }
