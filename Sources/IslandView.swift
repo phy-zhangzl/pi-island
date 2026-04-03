@@ -49,7 +49,7 @@ struct IslandView: View {
             return activeSessions
         }
 
-        return Array(realSessions.sorted(by: sessionSort).prefix(2))
+        return Array(realSessions.sorted(by: sessionSort).prefix(1))
     }
 
     private var sessionCount: Int {
@@ -344,52 +344,38 @@ struct IslandView: View {
     }
 
     private func activeCapsuleSummary(_ session: AgentSession, accent: Color) -> some View {
-        let showsCompactContextBadge = layout.panelWidth >= 420
+        let showsCompactContextBadge = layout.panelWidth >= 320
         let panelInfluence = heightProgress
-        let title = capsuleSessionTitle(for: session)
-        let subtitle = capsuleSessionSubtitle(for: session)
 
-        return HStack(spacing: 10) {
-            PixelCatPet(color: accent, state: session.state)
-                .frame(width: 20, height: 20)
-                .scaleEffect(1.04 - panelInfluence * 0.04)
-                .shadow(color: accent.opacity(interpolate(from: 0.18, to: 0.12, progress: panelInfluence)), radius: interpolate(from: 6, to: 4, progress: panelInfluence))
+        return ZStack {
+            HStack(spacing: 10) {
+                PixelCatPet(color: accent, state: session.state)
+                    .frame(width: 20, height: 20)
+                    .scaleEffect(1.04 - panelInfluence * 0.04)
+                    .shadow(color: accent.opacity(interpolate(from: 0.18, to: 0.12, progress: panelInfluence)), radius: interpolate(from: 6, to: 4, progress: panelInfluence))
 
-            VStack(alignment: .leading, spacing: 1) {
-                Text(title)
-                    .font(.system(size: 11, weight: .heavy, design: .monospaced))
-                    .foregroundStyle(.white)
-                    .lineLimit(1)
-                Text(subtitle)
-                    .font(.system(size: 9, weight: .bold, design: .monospaced))
-                    .foregroundStyle(accent.opacity(0.92))
-                    .lineLimit(1)
+                if showsCompactContextBadge {
+                    capsuleContextBadge(session, accent: accent)
+                        .opacity(0.96 + panelInfluence * 0.04)
+                        .scaleEffect(0.985 + panelInfluence * 0.015, anchor: .leading)
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            if showsCompactContextBadge {
-                capsuleContextBadge(session, accent: accent)
-                    .opacity(0.96 + panelInfluence * 0.04)
-                    .scaleEffect(0.985 + panelInfluence * 0.015, anchor: .leading)
-            }
-
-            HStack(spacing: 8) {
-                trackingModeBadge(accent: accent)
-
+            HStack(spacing: 10) {
                 capsuleStateBadge(session, accent: accent)
                     .opacity(1)
                     .scaleEffect(0.985 + panelInfluence * 0.015, anchor: .trailing)
 
-                if activeSessionCount > 1 {
-                    Text("+\(activeSessionCount - 1)")
-                        .font(.system(size: 11, weight: .black, design: .monospaced))
-                        .foregroundStyle(accent)
-                        .lineLimit(1)
-                        .fixedSize(horizontal: true, vertical: false)
-                        .opacity(0.92 + panelInfluence * 0.08)
-                        .offset(y: -0.5 + panelInfluence * 0.5)
-                }
+                Text("\(max(sessionCount, 1))")
+                    .font(.system(size: 12, weight: .black, design: .monospaced))
+                    .foregroundStyle(accent)
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .opacity(0.92 + panelInfluence * 0.08)
+                    .offset(y: -0.5 + panelInfluence * 0.5)
             }
+            .frame(maxWidth: .infinity, alignment: .trailing)
         }
         .padding(.horizontal, capsuleContentHorizontalPadding)
         .frame(maxWidth: .infinity, alignment: .center)
@@ -461,10 +447,6 @@ struct IslandView: View {
         let rows = displaySessions
 
         return VStack(spacing: 0) {
-            panelTrackingHeader
-                .padding(.top, 10)
-                .padding(.horizontal, panelContentHorizontalInset)
-
             ScrollView(showsIndicators: isShowingActiveOnly && rows.count > 2) {
                 LazyVStack(spacing: rowSpacing) {
                     ForEach(Array(rows.enumerated()), id: \.element.id) { index, item in
@@ -476,7 +458,7 @@ struct IslandView: View {
                             .offset(y: (1 - rowProgress) * -8)
                     }
                 }
-                .padding(.top, 8)
+                .padding(.top, expandedListTopPadding)
                 .padding(.horizontal, panelContentHorizontalInset)
                 .padding(.bottom, expandedBottomPadding)
             }
@@ -492,18 +474,12 @@ struct IslandView: View {
 
             VStack(alignment: .leading, spacing: 5) {
                 HStack(spacing: 8) {
-                    Text(capsuleSessionTitle(for: session))
+                    Text(session.name)
                         .font(.system(size: 12, weight: .heavy, design: .monospaced))
                         .foregroundStyle(.white)
                         .lineLimit(1)
 
                     Spacer()
-
-                    if session.id == selectedSessionID {
-                        Text("focus")
-                            .font(.system(size: 9, weight: .black, design: .monospaced))
-                            .foregroundStyle(session.state.accentColor)
-                    }
                 }
 
                 Text(piStateLabel(for: session.state))
@@ -522,11 +498,6 @@ struct IslandView: View {
                             .foregroundStyle(session.state.accentColor)
                             .lineLimit(1)
                     }
-
-                    Text(session.workspaceName)
-                        .font(.system(size: 10, weight: .bold, design: .monospaced))
-                        .foregroundStyle(Color(hex: 0x8B93A1))
-                        .lineLimit(1)
 
                     Text(session.cwd)
                         .font(.system(size: 10, weight: .medium, design: .monospaced))
@@ -557,38 +528,6 @@ struct IslandView: View {
         }
     }
 
-    private var panelTrackingHeader: some View {
-        HStack(spacing: 8) {
-            Text(isPinnedExpanded ? "tracking pinned" : "tracking active")
-                .font(.system(size: 10, weight: .black, design: .monospaced))
-                .foregroundStyle(.white)
-
-            if activeSessionCount > 1 {
-                Text("\(activeSessionCount) live")
-                    .font(.system(size: 10, weight: .bold, design: .monospaced))
-                    .foregroundStyle(Color(hex: 0x8B93A1))
-            }
-
-            Spacer()
-        }
-    }
-
-    private func trackingModeBadge(accent: Color) -> some View {
-        Text(isPinnedExpanded ? "pin" : "auto")
-            .font(.system(size: 9, weight: .black, design: .monospaced))
-            .foregroundStyle(isPinnedExpanded ? Color.black : accent)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 4)
-            .background(
-                Capsule(style: .continuous)
-                    .fill(isPinnedExpanded ? accent : Color(hex: 0x0A0A0A))
-            )
-            .overlay(
-                Capsule(style: .continuous)
-                    .stroke(accent.opacity(isPinnedExpanded ? 0 : 0.4), lineWidth: 1)
-            )
-    }
-
     private func sessionPriority(for session: AgentSession) -> Int {
         switch session.state {
         case .running: return 500
@@ -611,26 +550,6 @@ struct IslandView: View {
             return lhs.updatedAt > rhs.updatedAt
         }
         return lhs.id < rhs.id
-    }
-
-    private func capsuleSessionTitle(for session: AgentSession) -> String {
-        let title = session.name.trimmingCharacters(in: .whitespacesAndNewlines)
-        if title.isEmpty || title == "Untitled session" {
-            return session.workspaceName
-        }
-        if title.count <= 22 {
-            return title
-        }
-        return String(title.prefix(19)) + "..."
-    }
-
-    private func capsuleSessionSubtitle(for session: AgentSession) -> String {
-        let workspace = session.workspaceName.trimmingCharacters(in: .whitespacesAndNewlines)
-        let label = piStateLabel(for: session.state)
-        if workspace.isEmpty {
-            return label
-        }
-        return "\(workspace) · \(label)"
     }
 
     private func compactStatusLabel(for state: VibeState) -> String {
