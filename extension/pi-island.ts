@@ -204,6 +204,11 @@ export default function (pi: ExtensionAPI) {
     await setState(ctx, "idle", "Ready");
   });
 
+  pi.on("session_shutdown", async (_event, ctx) => {
+    hadError = false;
+    await setState(ctx, "idle", "Session ended");
+  });
+
   pi.on("agent_start", async (_event, ctx) => {
     hadError = false;
     await setState(ctx, "thinking", "Processing request");
