@@ -3,7 +3,8 @@ import AppKit
 
 struct WindowAccessor: NSViewRepresentable {
     let layout: OverlayLayout
-    let usesExpandedWindowLayout: Bool
+    let windowSize: CGSize
+    let windowOrigin: NSPoint
 
     func makeNSView(context: Context) -> NSView {
         let view = NSView()
@@ -42,13 +43,11 @@ struct WindowAccessor: NSViewRepresentable {
 
     /// Frame-only update, called on every SwiftUI state change.
     private func updateFrame(window: NSWindow) {
-        let size = layout.expandedWindowSize
-        let origin = layout.expandedOrigin
         let frame = NSRect(
-            x: origin.x,
-            y: origin.y - size.height,
-            width: size.width,
-            height: size.height
+            x: windowOrigin.x,
+            y: windowOrigin.y - windowSize.height,
+            width: windowSize.width,
+            height: windowSize.height
         )
         guard window.frame != frame else { return }
         window.setFrame(frame, display: true, animate: false)

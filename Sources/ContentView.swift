@@ -474,12 +474,33 @@ struct ContentView: View {
         return OverlayLayout.current() ?? OverlayLayout(screen: NSScreen.main!, calibration: .load())
     }
 
-    private var usesExpandedWindowLayout: Bool {
-        true
+    private var selectedVisibleSession: AgentSession? {
+        model.visibleSessions.first(where: { $0.id == model.selectedSessionID }) ?? model.visibleSessions.first
+    }
+
+    private var shouldUseExpandedWindow: Bool {
+        model.expanded
+    }
+
+    private var shouldUseActiveCompactWindow: Bool {
+        !model.expanded && (selectedVisibleSession?.state.isLiveActivity == true)
     }
 
     private var windowSize: CGSize {
-        layout.expandedWindowSize
+        if shouldUseExpandedWindow {
+            return layout.expandedWindowSize
+        }
+        if shouldUseActiveCompactWindow {
+            return CGSize(width: layout.expandedWindowSize.width, height: layout.compactHeight)
+        }
+        return layout.compactWindowSize
+    }
+
+    private var windowOrigin: NSPoint {
+        if shouldUseExpandedWindow || shouldUseActiveCompactWindow {
+            return layout.expandedOrigin
+        }
+        return layout.compactOrigin
     }
 
     var body: some View {
@@ -511,7 +532,7 @@ struct ContentView: View {
             )
         }
         .frame(width: windowSize.width, height: windowSize.height, alignment: .top)
-        .background(WindowAccessor(layout: layout, usesExpandedWindowLayout: usesExpandedWindowLayout))
+        .background(WindowAccessor(layout: layout, windowSize: windowSize, windowOrigin: windowOrigin))
         .onReceive(activityTimer) { _ in
             model.refreshActivity()
         }
