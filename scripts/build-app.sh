@@ -10,6 +10,7 @@ APP_DIR="$ROOT_DIR/dist/${APP_NAME}.app"
 CONTENTS_DIR="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
+ICON_PATH="$ROOT_DIR/Resources/AppIcon.icns"
 EXECUTABLE_PATH=""
 
 printf '==> Building release executable\n'
@@ -40,6 +41,8 @@ cat > "$CONTENTS_DIR/Info.plist" <<PLIST
     <string>${APP_NAME}</string>
     <key>CFBundleIdentifier</key>
     <string>${BUNDLE_ID}</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
@@ -59,6 +62,10 @@ cat > "$CONTENTS_DIR/Info.plist" <<PLIST
 </dict>
 </plist>
 PLIST
+
+if [[ -f "$ICON_PATH" ]]; then
+  cp "$ICON_PATH" "$RESOURCES_DIR/AppIcon.icns"
+fi
 
 printf '==> App bundle ready\n'
 printf 'Open it with:\n  open "%s"\n' "$APP_DIR"

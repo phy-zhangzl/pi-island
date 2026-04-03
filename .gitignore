@@ -1,8 +1,4 @@
 .build/
-.swiftpm/
-*.xcodeproj/
-xcuserdata/
-DerivedData/
-.DS_Store
-/tmp/
 .pi/
+dist/
+Resources/AppIcon.iconset/
