@@ -19,9 +19,13 @@ struct IslandView: View {
     @State private var widthProgress: CGFloat = 0
     @State private var heightProgress: CGFloat = 0
     @State private var visualStateToken: Int = 0
+    @State private var visualTransitionTask: DispatchWorkItem?
     @State private var capsuleHoverDebounceTask: DispatchWorkItem?
     @State private var panelHoverDebounceTask: DispatchWorkItem?
     private let hoverDebounceInterval: TimeInterval = 0.08
+    private let panelExpandHeightDelay: TimeInterval = 0.04
+    private let panelCollapseWidthDelay: TimeInterval = 0.14
+    private let compactExpandWidthDelay: TimeInterval = 0.03
 
     private struct VisualPhaseKey: Equatable {
         let isLiveActivity: Bool
@@ -75,6 +79,10 @@ struct IslandView: View {
     private var capsuleHoverVerticalPadding: CGFloat { 10 }
     private var panelHoverBridgeHeight: CGFloat { 22 }
 
+    private func compactDisplayState(for session: AgentSession) -> VibeState {
+        session.state.isLiveActivity ? session.state : .idle
+    }
+
     private var visibleRowCount: Int {
         max(1, min(displaySessions.count, 2))
     }
@@ -90,6 +98,7 @@ struct IslandView: View {
     var body: some View {
         if let selectedSession {
             let isPiWorking = selectedSession.state.isLiveActivity
+            let compactState = compactDisplayState(for: selectedSession)
             let visualKey = VisualPhaseKey(isLiveActivity: isPiWorking, isExpanded: expanded)
             let collapsedWidth = staticCompactWidth
             let expandedWidth = activeCompactWidth(for: selectedSession)
@@ -102,7 +111,7 @@ struct IslandView: View {
                 unifiedShell(
                     width: containerWidth,
                     height: containerHeight,
-                    accent: selectedSession.state.accentColor,
+                    accent: compactState.accentColor,
                     isActive: isPiWorking
                 )
 
@@ -119,7 +128,7 @@ struct IslandView: View {
                     .allowsHitTesting(expanded || heightProgress > 0.01)
 
                 VStack(spacing: 0) {
-                    capsuleContent(selectedSession)
+                    capsuleContent(selectedSession, compactState: compactState)
                         .frame(width: containerWidth, height: layout.compactHeight, alignment: .center)
                         .contentShape(Rectangle())
                         .onHover { isHovering in
@@ -209,7 +218,10 @@ struct IslandView: View {
 
     private func syncVisualState(for key: VisualPhaseKey, animated: Bool) {
         visualStateToken += 1
+        visualTransitionTask?.cancel()
+        visualTransitionTask = nil
 
+        let token = visualStateToken
         let targetWidth: CGFloat = (key.isLiveActivity || key.isExpanded) ? 1 : 0
         let targetHeight: CGFloat = key.isExpanded ? 1 : 0
 
@@ -219,14 +231,62 @@ struct IslandView: View {
             return
         }
 
-        // Drive width and height simultaneously with different spring curves
-        // to create a natural staggered feel without GCD delays.
-        withAnimation(.spring(response: 0.22, dampingFraction: 0.88)) {
-            widthProgress = targetWidth
+        let isExpandingPanel = targetHeight > heightProgress
+        let isCollapsingPanel = targetHeight < heightProgress
+        let isWidthOnlyChange = targetHeight == heightProgress && targetWidth != widthProgress
+
+        if isExpandingPanel {
+            withAnimation(.spring(response: 0.24, dampingFraction: 0.9)) {
+                widthProgress = targetWidth
+            }
+
+            let task = DispatchWorkItem {
+                guard visualStateToken == token else { return }
+                withAnimation(.spring(response: 0.34, dampingFraction: 0.9)) {
+                    heightProgress = targetHeight
+                }
+                visualTransitionTask = nil
+            }
+            visualTransitionTask = task
+            DispatchQueue.main.asyncAfter(deadline: .now() + panelExpandHeightDelay, execute: task)
+            return
         }
-        // Height uses a slightly slower spring so it visually lags behind width
-        withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
-            heightProgress = targetHeight
+
+        if isCollapsingPanel {
+            withAnimation(.spring(response: 0.24, dampingFraction: 0.92)) {
+                heightProgress = targetHeight
+            }
+
+            if targetWidth != widthProgress {
+                let task = DispatchWorkItem {
+                    guard visualStateToken == token else { return }
+                    withAnimation(.spring(response: 0.22, dampingFraction: 0.94)) {
+                        widthProgress = targetWidth
+                    }
+                    visualTransitionTask = nil
+                }
+                visualTransitionTask = task
+                DispatchQueue.main.asyncAfter(deadline: .now() + panelCollapseWidthDelay, execute: task)
+            }
+            return
+        }
+
+        if isWidthOnlyChange {
+            if targetWidth > widthProgress {
+                let task = DispatchWorkItem {
+                    guard visualStateToken == token else { return }
+                    withAnimation(.interactiveSpring(response: 0.34, dampingFraction: 0.84, blendDuration: 0.08)) {
+                        widthProgress = targetWidth
+                    }
+                    visualTransitionTask = nil
+                }
+                visualTransitionTask = task
+                DispatchQueue.main.asyncAfter(deadline: .now() + compactExpandWidthDelay, execute: task)
+            } else {
+                withAnimation(.spring(response: 0.2, dampingFraction: 0.94)) {
+                    widthProgress = targetWidth
+                }
+            }
         }
     }
 
@@ -300,14 +360,14 @@ struct IslandView: View {
             .frame(width: width, height: height)
     }
 
-    private func capsuleContent(_ session: AgentSession) -> some View {
+    private func capsuleContent(_ session: AgentSession, compactState: VibeState) -> some View {
         let isPiWorking = session.state.isLiveActivity
-        let accent = session.state.accentColor
+        let accent = compactState.accentColor
 
         return ZStack {
             HStack(spacing: 0) {
                 HStack(spacing: 0) {
-                    PixelCatPet(color: accent, state: session.state)
+                    PixelCatPet(color: accent, state: compactState)
                         .frame(width: 20, height: 20)
                 }
                 .frame(width: staticSideRegionWidth, alignment: .center)
