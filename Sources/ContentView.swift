@@ -465,9 +465,18 @@ final class AppModel: ObservableObject {
 }
 
 struct ContentView: View {
+    private enum WindowFrameMode: Int {
+        case staticCompact = 0
+        case wideCompact = 1
+        case expanded = 2
+    }
+
     @EnvironmentObject private var model: AppModel
     private let activityTimer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
     @State private var cachedLayout: OverlayLayout?
+    @State private var windowFrameMode: WindowFrameMode = .staticCompact
+    @State private var pendingWindowFrameModeTask: DispatchWorkItem?
+    private let windowFrameCollapseDelay: TimeInterval = 0.36
 
     private var layout: OverlayLayout {
         if let cached = cachedLayout { return cached }
@@ -478,29 +487,34 @@ struct ContentView: View {
         model.visibleSessions.first(where: { $0.id == model.selectedSessionID }) ?? model.visibleSessions.first
     }
 
-    private var shouldUseExpandedWindow: Bool {
-        model.expanded
-    }
-
-    private var shouldUseActiveCompactWindow: Bool {
-        !model.expanded && (selectedVisibleSession?.state.isLiveActivity == true)
+    private var desiredWindowFrameMode: WindowFrameMode {
+        if model.expanded {
+            return .expanded
+        }
+        if selectedVisibleSession?.state.isLiveActivity == true {
+            return .wideCompact
+        }
+        return .staticCompact
     }
 
     private var windowSize: CGSize {
-        if shouldUseExpandedWindow {
+        switch windowFrameMode {
+        case .expanded:
             return layout.expandedWindowSize
-        }
-        if shouldUseActiveCompactWindow {
+        case .wideCompact:
             return CGSize(width: layout.expandedWindowSize.width, height: layout.compactHeight)
+        case .staticCompact:
+            return layout.compactWindowSize
         }
-        return layout.compactWindowSize
     }
 
     private var windowOrigin: NSPoint {
-        if shouldUseExpandedWindow || shouldUseActiveCompactWindow {
+        switch windowFrameMode {
+        case .expanded, .wideCompact:
             return layout.expandedOrigin
+        case .staticCompact:
+            return layout.compactOrigin
         }
-        return layout.compactOrigin
     }
 
     var body: some View {
@@ -538,7 +552,33 @@ struct ContentView: View {
         }
         .onAppear {
             cachedLayout = OverlayLayout.current() ?? OverlayLayout(screen: NSScreen.main!, calibration: .load())
+            syncWindowFrameMode(to: desiredWindowFrameMode, animated: false)
         }
+        .onChange(of: desiredWindowFrameMode) { nextMode in
+            syncWindowFrameMode(to: nextMode, animated: true)
+        }
+    }
+
+    private func syncWindowFrameMode(to nextMode: WindowFrameMode, animated: Bool) {
+        pendingWindowFrameModeTask?.cancel()
+        pendingWindowFrameModeTask = nil
+
+        guard animated else {
+            windowFrameMode = nextMode
+            return
+        }
+
+        if nextMode.rawValue >= windowFrameMode.rawValue {
+            windowFrameMode = nextMode
+            return
+        }
+
+        let task = DispatchWorkItem {
+            windowFrameMode = nextMode
+            pendingWindowFrameModeTask = nil
+        }
+        pendingWindowFrameModeTask = task
+        DispatchQueue.main.asyncAfter(deadline: .now() + windowFrameCollapseDelay, execute: task)
     }
 }
 

@@ -2,3 +2,4 @@
 .pi/
 dist/
 Resources/AppIcon.iconset/
+.DS_Store
