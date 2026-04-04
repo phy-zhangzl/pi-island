@@ -96,10 +96,11 @@ struct AgentSession: Identifiable, Equatable {
 final class AppModel: ObservableObject {
     @Published var sessions: [AgentSession]
     @Published var selectedSessionID: String
-    @Published var expanded = false
     @Published var isHoveringIsland = false
     @Published var isHoveringPanel = false
     @Published var isPinnedExpanded = false
+    @Published private(set) var isIslandHoverPromotedToPanel = false
+    @Published private(set) var isHoldingDynamicCapsuleOnExit = false
     @Published var lastEventText = "Waiting for pi events"
     @Published private(set) var hasBackgroundPi = false
     @Published private(set) var activeSessionCount = 0
@@ -110,9 +111,15 @@ final class AppModel: ObservableObject {
     private var collapseWorkItem: DispatchWorkItem?
     private var hoverExpandWorkItem: DispatchWorkItem?
     private var hoverCollapseWorkItem: DispatchWorkItem?
+    private var islandHoverPromotionWorkItem: DispatchWorkItem?
+    private var islandHoverExitWorkItem: DispatchWorkItem?
+    private var panelCollapseToStaticWorkItem: DispatchWorkItem?
+    private var lastIslandHoverActivationAt: TimeInterval = 0
     private let inactivityTimeout: TimeInterval = 12
     private let hoverExpandDelay: TimeInterval = 0.0
     private let hoverCollapseDelay: TimeInterval = 0.16
+    private let islandHoverPanelPromotionDelay: TimeInterval = 0.16
+    private let islandHoverExitGracePeriod: TimeInterval = 0.16
 
     init() {
         let now = Date().timeIntervalSince1970
@@ -139,8 +146,27 @@ final class AppModel: ObservableObject {
         sessions.filter { $0.id != "mock-chatbot" }.sorted { $0.updatedAt > $1.updatedAt }
     }
 
-    var shouldShowExpanded: Bool {
-        isHoveringIsland || isHoveringPanel || isPinnedExpanded
+    var shouldShowPanel: Bool {
+        isHoveringPanel || isPinnedExpanded || (isHoveringIsland && isIslandHoverPromotedToPanel)
+    }
+
+    var isPanelPresented: Bool {
+        presentationMode == .panel
+    }
+
+    var presentationContext: IslandPresentationContext {
+        IslandPresentationContext(
+            hasLiveActivity: activeSessionCount > 0,
+            isHoveringIsland: isHoveringIsland,
+            isHoveringPanel: isHoveringPanel,
+            isPinnedPanel: isPinnedExpanded,
+            isIslandHoverPromotedToPanel: isIslandHoverPromotedToPanel,
+            isHoldingDynamicCapsuleOnExit: isHoldingDynamicCapsuleOnExit
+        )
+    }
+
+    var presentationMode: IslandPresentationMode {
+        resolvePresentationMode(from: presentationContext)
     }
 
     var visibleSessions: [AgentSession] {
@@ -196,29 +222,83 @@ final class AppModel: ObservableObject {
             collapseWorkItem?.cancel()
             hoverExpandWorkItem?.cancel()
             hoverCollapseWorkItem?.cancel()
-            if !shouldShowExpanded {
+            if !shouldShowPanel {
                 isPinnedExpanded = false
-                setExpandedAnimated(false)
             }
         } else if payload.state == .done || payload.state == .error {
-            setExpandedAnimated(true)
+            isPinnedExpanded = true
             scheduleAutoCollapse(for: payload.state)
         }
     }
 
     func setIslandHovering(_ isHovering: Bool) {
-        isHoveringIsland = isHovering
-        syncExpandedWithHoverState()
+        if isHovering {
+            islandHoverExitWorkItem?.cancel()
+            islandHoverExitWorkItem = nil
+
+            guard !isHoveringIsland else {
+                syncExpandedWithHoverState()
+                return
+            }
+
+            isHoveringIsland = true
+            isIslandHoverPromotedToPanel = false
+            cancelPanelCollapseToStaticHold()
+            lastIslandHoverActivationAt = Date().timeIntervalSince1970
+            scheduleIslandHoverPanelPromotion()
+            syncExpandedWithHoverState()
+            return
+        }
+
+        islandHoverPromotionWorkItem?.cancel()
+        islandHoverPromotionWorkItem = nil
+
+        guard isHoveringIsland else {
+            syncExpandedWithHoverState()
+            return
+        }
+
+        let now = Date().timeIntervalSince1970
+        let elapsed = now - lastIslandHoverActivationAt
+        let remainingGrace = islandHoverExitGracePeriod - elapsed
+
+        let clearHover = DispatchWorkItem { [weak self] in
+            Task { @MainActor in
+                guard let self else { return }
+                self.isHoveringIsland = false
+                self.isIslandHoverPromotedToPanel = false
+                self.syncExpandedWithHoverState()
+            }
+        }
+
+        islandHoverExitWorkItem?.cancel()
+        islandHoverExitWorkItem = clearHover
+
+        if remainingGrace > 0, !isHoveringPanel, !isPinnedExpanded {
+            DispatchQueue.main.asyncAfter(deadline: .now() + remainingGrace, execute: clearHover)
+        } else {
+            clearHover.perform()
+        }
     }
 
     func setPanelHovering(_ isHovering: Bool) {
         isHoveringPanel = isHovering
+        if isHovering {
+            islandHoverPromotionWorkItem?.cancel()
+            islandHoverPromotionWorkItem = nil
+            cancelPanelCollapseToStaticHold()
+            if isHoveringIsland {
+                isIslandHoverPromotedToPanel = true
+            }
+        }
         syncExpandedWithHoverState()
     }
 
     func togglePinnedExpanded() {
         isPinnedExpanded.toggle()
-        if !isPinnedExpanded {
+        if isPinnedExpanded {
+            cancelPanelCollapseToStaticHold()
+        } else {
             promoteMostRelevantSessionIfNeeded()
         }
         syncExpandedWithHoverState()
@@ -227,6 +307,7 @@ final class AppModel: ObservableObject {
     func selectSession(_ id: String) {
         selectedSessionID = id
         isPinnedExpanded = true
+        cancelPanelCollapseToStaticHold()
         syncExpandedWithHoverState()
     }
 
@@ -240,6 +321,21 @@ final class AppModel: ObservableObject {
         hoverExpandWorkItem = nil
     }
 
+    private func scheduleIslandHoverPanelPromotion() {
+        islandHoverPromotionWorkItem?.cancel()
+
+        let work = DispatchWorkItem { [weak self] in
+            Task { @MainActor in
+                guard let self else { return }
+                guard self.isHoveringIsland, !self.isPinnedExpanded else { return }
+                self.isIslandHoverPromotedToPanel = true
+                self.syncExpandedWithHoverState()
+            }
+        }
+        islandHoverPromotionWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + islandHoverPanelPromotionDelay, execute: work)
+    }
+
     func scheduleExpandAfterHoverEnter() {
         cancelScheduledCollapse()
         cancelScheduledExpand()
@@ -247,8 +343,7 @@ final class AppModel: ObservableObject {
         let work = DispatchWorkItem { [weak self] in
             Task { @MainActor in
                 guard let self else { return }
-                guard self.shouldShowExpanded else { return }
-                self.setExpandedAnimated(true)
+                guard self.shouldShowPanel else { return }
             }
         }
         hoverExpandWorkItem = work
@@ -268,7 +363,6 @@ final class AppModel: ObservableObject {
             Task { @MainActor in
                 guard let self else { return }
                 guard !self.isHoveringIsland, !self.isHoveringPanel, !self.isPinnedExpanded else { return }
-                self.setExpandedAnimated(false)
             }
         }
         hoverCollapseWorkItem = work
@@ -276,11 +370,40 @@ final class AppModel: ObservableObject {
     }
 
     private func syncExpandedWithHoverState() {
-        if shouldShowExpanded {
+        if shouldShowPanel {
+            cancelPanelCollapseToStaticHold()
             scheduleExpandAfterHoverEnter()
         } else {
             scheduleCollapseAfterHoverExit()
+
+            if activeSessionCount == 0, !isHoveringIsland, !isHoveringPanel, !isPinnedExpanded {
+                schedulePanelCollapseToStaticHold()
+            } else {
+                cancelPanelCollapseToStaticHold()
+            }
         }
+    }
+
+    private func schedulePanelCollapseToStaticHold() {
+        panelCollapseToStaticWorkItem?.cancel()
+        isHoldingDynamicCapsuleOnExit = true
+
+        let work = DispatchWorkItem { [weak self] in
+            Task { @MainActor in
+                guard let self else { return }
+                guard self.activeSessionCount == 0, !self.shouldShowPanel, !self.isHoveringIsland, !self.isHoveringPanel, !self.isPinnedExpanded else { return }
+                self.isHoldingDynamicCapsuleOnExit = false
+                self.panelCollapseToStaticWorkItem = nil
+            }
+        }
+        panelCollapseToStaticWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + IslandMotionTokens.panelCollapseToStaticHoldDelay, execute: work)
+    }
+
+    private func cancelPanelCollapseToStaticHold() {
+        panelCollapseToStaticWorkItem?.cancel()
+        panelCollapseToStaticWorkItem = nil
+        isHoldingDynamicCapsuleOnExit = false
     }
 
     func refreshActivity() {
@@ -309,8 +432,7 @@ final class AppModel: ObservableObject {
 
         refreshCountsAndSelection()
 
-        if activeSessionCount == 0, !isHoveringIsland, !isHoveringPanel, !isPinnedExpanded, expanded {
-            setExpandedAnimated(false)
+        if activeSessionCount == 0, !isHoveringIsland, !isHoveringPanel, !isPinnedExpanded, isPanelPresented {
             collapseWorkItem?.cancel()
             hoverExpandWorkItem?.cancel()
             hoverCollapseWorkItem?.cancel()
@@ -350,15 +472,6 @@ final class AppModel: ObservableObject {
         if merged != detectedSessions {
             detectedSessions = merged
         }
-    }
-
-    /// Single unified method for animated expand/collapse.
-    /// All expand/collapse paths must go through this to avoid conflicting animations.
-    private func setExpandedAnimated(_ value: Bool) {
-        guard expanded != value else { return }
-        // Use a single consistent spring so IslandView.syncVisualState
-        // receives one clean onChange instead of competing animation contexts.
-        expanded = value
     }
 
     private func promoteMostRelevantSessionIfNeeded() {
@@ -420,7 +533,6 @@ final class AppModel: ObservableObject {
                 // Don't force-clear hover if user is actively hovering (#6 fix)
                 guard !self.isHoveringIsland, !self.isHoveringPanel else { return }
                 self.isPinnedExpanded = false
-                self.setExpandedAnimated(false)
             }
         }
         collapseWorkItem = work
@@ -469,6 +581,17 @@ struct ContentView: View {
         case staticCompact = 0
         case wideCompact = 1
         case expanded = 2
+
+        init(presentationMode: IslandPresentationMode) {
+            switch presentationMode {
+            case .staticCapsule:
+                self = .staticCompact
+            case .dynamicCapsule:
+                self = .wideCompact
+            case .panel:
+                self = .expanded
+            }
+        }
     }
 
     @EnvironmentObject private var model: AppModel
@@ -476,25 +599,14 @@ struct ContentView: View {
     @State private var cachedLayout: OverlayLayout?
     @State private var windowFrameMode: WindowFrameMode = .staticCompact
     @State private var pendingWindowFrameModeTask: DispatchWorkItem?
-    private let windowFrameCollapseDelay: TimeInterval = 0.36
 
     private var layout: OverlayLayout {
         if let cached = cachedLayout { return cached }
         return OverlayLayout.current() ?? OverlayLayout(screen: NSScreen.main!, calibration: .load())
     }
 
-    private var selectedVisibleSession: AgentSession? {
-        model.visibleSessions.first(where: { $0.id == model.selectedSessionID }) ?? model.visibleSessions.first
-    }
-
     private var desiredWindowFrameMode: WindowFrameMode {
-        if model.expanded {
-            return .expanded
-        }
-        if selectedVisibleSession?.state.isLiveActivity == true {
-            return .wideCompact
-        }
-        return .staticCompact
+        WindowFrameMode(presentationMode: model.presentationMode)
     }
 
     private var windowSize: CGSize {
@@ -524,7 +636,7 @@ struct ContentView: View {
             IslandView(
                 sessions: model.visibleSessions,
                 selectedSessionID: model.selectedSessionID,
-                expanded: model.expanded,
+                presentationMode: model.presentationMode,
                 layout: layout,
                 hasBackgroundPi: model.hasBackgroundPi,
                 activeSessionCount: model.activeSessionCount,
@@ -568,8 +680,17 @@ struct ContentView: View {
             return
         }
 
-        if nextMode.rawValue >= windowFrameMode.rawValue {
-            windowFrameMode = nextMode
+        if nextMode.rawValue > windowFrameMode.rawValue {
+            if windowFrameMode == .staticCompact, nextMode == .wideCompact {
+                let task = DispatchWorkItem {
+                    windowFrameMode = nextMode
+                    pendingWindowFrameModeTask = nil
+                }
+                pendingWindowFrameModeTask = task
+                DispatchQueue.main.asyncAfter(deadline: .now() + IslandMotionTokens.windowFrameWideExpandDelay, execute: task)
+            } else {
+                windowFrameMode = nextMode
+            }
             return
         }
 
@@ -578,7 +699,7 @@ struct ContentView: View {
             pendingWindowFrameModeTask = nil
         }
         pendingWindowFrameModeTask = task
-        DispatchQueue.main.asyncAfter(deadline: .now() + windowFrameCollapseDelay, execute: task)
+        DispatchQueue.main.asyncAfter(deadline: .now() + IslandMotionTokens.windowFrameCollapseDelay, execute: task)
     }
 }
 

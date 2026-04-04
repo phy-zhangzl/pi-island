@@ -4,7 +4,7 @@ import Foundation
 struct IslandView: View {
     let sessions: [AgentSession]
     let selectedSessionID: String
-    let expanded: Bool
+    let presentationMode: IslandPresentationMode
     let layout: OverlayLayout
     let hasBackgroundPi: Bool
     let activeSessionCount: Int
@@ -14,46 +14,26 @@ struct IslandView: View {
     let onTogglePinnedExpanded: () -> Void
     let onSelectSession: (String) -> Void
 
+    @StateObject private var motionCoordinator = IslandMotionCoordinator()
     @State private var isHoveringCapsule = false
     @State private var isHoveringPanel = false
-    @State private var widthProgress: CGFloat = 0
-    @State private var heightProgress: CGFloat = 0
-    @State private var visualStateToken: Int = 0
-    @State private var visualTransitionTask: DispatchWorkItem?
     @State private var capsuleHoverDebounceTask: DispatchWorkItem?
     @State private var panelHoverDebounceTask: DispatchWorkItem?
-    private let hoverDebounceInterval: TimeInterval = 0.08
-    private let panelExpandHeightDelay: TimeInterval = 0.04
-    private let panelCollapseWidthDelay: TimeInterval = 0.14
-    private let compactExpandWidthDelay: TimeInterval = 0.03
-
-    private struct VisualPhaseKey: Equatable {
-        let isLiveActivity: Bool
-        let isExpanded: Bool
-    }
 
     private var selectedSession: AgentSession? {
         sessions.first(where: { $0.id == selectedSessionID }) ?? sessions.first
     }
 
-    private var realSessions: [AgentSession] {
-        sessions.filter { $0.id != "mock-chatbot" }
-    }
-
-    private var activeSessions: [AgentSession] {
-        realSessions.filter { $0.state.isLiveActivity }.sorted(by: sessionSort)
-    }
-
-    private var displaySessions: [AgentSession] {
-        if realSessions.isEmpty {
-            return Array(sessions.prefix(1))
-        }
-
-        if !activeSessions.isEmpty {
-            return activeSessions
-        }
-
-        return Array(realSessions.sorted(by: sessionSort).prefix(1))
+    private var panelState: IslandPanelState {
+        IslandPanelResolver.resolve(
+            sessions: sessions,
+            selectedSessionID: selectedSessionID,
+            rowHeight: rowHeight,
+            rowSpacing: rowSpacing,
+            topPadding: expandedListTopPadding,
+            bottomPadding: expandedBottomPadding,
+            sessionSort: sessionSort
+        )
     }
 
     private var sessionCount: Int {
@@ -64,7 +44,7 @@ struct IslandView: View {
     }
 
     private var isShowingActiveOnly: Bool {
-        !activeSessions.isEmpty
+        panelState.isShowingActiveOnly
     }
 
     private var rowHeight: CGFloat { 88 }
@@ -83,29 +63,33 @@ struct IslandView: View {
         session.state.isLiveActivity ? session.state : .idle
     }
 
-    private var visibleRowCount: Int {
-        max(1, min(displaySessions.count, 2))
-    }
-
-    private var expandedScrollHeight: CGFloat {
-        CGFloat(visibleRowCount) * rowHeight + CGFloat(max(visibleRowCount - 1, 0)) * rowSpacing
-    }
-
     private var expandedContainerHeight: CGFloat {
-        layout.compactHeight + expandedListTopPadding + expandedScrollHeight + expandedBottomPadding
+        layout.compactHeight + panelState.expandedContainerHeight
+    }
+
+    private func layoutTargets(for session: AgentSession) -> IslandLayoutTargets {
+        IslandLayoutResolver.resolve(
+            layout: layout,
+            presentationMode: presentationMode,
+            expandedContainerHeight: expandedContainerHeight,
+            collapsedWidth: staticCompactWidth,
+            expandedWidth: activeCompactWidth(for: session),
+            panelContentHorizontalInset: panelContentHorizontalInset
+        )
     }
 
     var body: some View {
         if let selectedSession {
             let isPiWorking = selectedSession.state.isLiveActivity
             let compactState = compactDisplayState(for: selectedSession)
-            let visualKey = VisualPhaseKey(isLiveActivity: isPiWorking, isExpanded: expanded)
-            let collapsedWidth = staticCompactWidth
-            let expandedWidth = activeCompactWidth(for: selectedSession)
-            let panelContentProgress = stagedProgress(heightProgress, start: 0.14, end: 0.68)
-            let containerWidth = interpolate(from: collapsedWidth, to: expandedWidth, progress: widthProgress)
-            let containerHeight = interpolate(from: layout.compactHeight, to: min(layout.expandedHeight, expandedContainerHeight), progress: heightProgress)
-            let sharedContentWidth = expandedWidth - panelContentHorizontalInset * 2
+            let motion = motionCoordinator.snapshot
+            let panelState = panelState
+            let layoutTargets = layoutTargets(for: selectedSession)
+            let panelContentProgress = stagedProgress(motion.panelContentProgress, start: 0.24, end: 0.9)
+            let panelBodyRevealProgress = stagedProgress(motion.panelHeightProgress, start: 0.42, end: 0.94)
+            let containerWidth = layoutTargets.containerWidth(using: motion)
+            let containerHeight = layoutTargets.containerHeight(using: motion)
+            let sharedContentWidth = layoutTargets.panelContentWidth
 
             ZStack(alignment: .top) {
                 unifiedShell(
@@ -121,15 +105,15 @@ struct IslandView: View {
                         height: panelHoverBridgeHeight
                     )
                     .contentShape(Rectangle())
-                    .offset(y: layout.compactHeight - panelHoverBridgeHeight * 0.5)
+                    .offset(y: layoutTargets.compactHeight - panelHoverBridgeHeight * 0.5)
                     .onHover { isHovering in
                         handlePanelHover(isHovering)
                     }
-                    .allowsHitTesting(expanded || heightProgress > 0.01)
+                    .allowsHitTesting(layoutTargets.panelVisible || motion.panelHeightProgress > 0.01)
 
                 VStack(spacing: 0) {
                     capsuleContent(selectedSession, compactState: compactState)
-                        .frame(width: containerWidth, height: layout.compactHeight, alignment: .center)
+                        .frame(width: containerWidth, height: layoutTargets.compactHeight, alignment: .center)
                         .contentShape(Rectangle())
                         .onHover { isHovering in
                             handleCapsuleHover(isHovering)
@@ -138,9 +122,9 @@ struct IslandView: View {
                             onTogglePinnedExpanded()
                         }
 
-                    expandedContent(selectedSession, revealProgress: panelContentProgress)
+                    expandedContent(selectedSession, panelState: panelState, revealProgress: panelContentProgress, bodyRevealProgress: panelBodyRevealProgress)
                         .frame(width: sharedContentWidth, alignment: .top)
-                        .frame(height: max(0, layout.expandedHeight - layout.compactHeight), alignment: .top)
+                        .frame(height: max(0, layoutTargets.expandedHeight - layoutTargets.compactHeight), alignment: .top)
                         .contentShape(Rectangle())
                         .onHover { isHovering in
                             handlePanelHover(isHovering)
@@ -149,16 +133,21 @@ struct IslandView: View {
                         .opacity(panelContentProgress)
                         .offset(y: (1 - panelContentProgress) * -4)
                         .scaleEffect(0.994 + panelContentProgress * 0.006, anchor: .top)
-                        .allowsHitTesting(expanded || heightProgress > 0.001)
+                        .allowsHitTesting(layoutTargets.panelVisible || motion.panelHeightProgress > 0.001)
                 }
                 .frame(width: containerWidth, height: containerHeight, alignment: .top)
+                .clipped()
+                .mask {
+                    shellMaskShape(isActive: isPiWorking)
+                        .frame(width: containerWidth, height: containerHeight)
+                }
             }
             .frame(width: layout.expandedWindowSize.width, height: layout.expandedWindowSize.height, alignment: .top)
             .onAppear {
-                syncVisualState(for: visualKey, animated: false)
+                motionCoordinator.apply(mode: presentationMode, animated: false)
             }
-            .onChange(of: visualKey) { nextKey in
-                syncVisualState(for: nextKey, animated: true)
+            .onChange(of: presentationMode) { nextMode in
+                motionCoordinator.apply(mode: nextMode, animated: true)
             }
         }
     }
@@ -178,7 +167,8 @@ struct IslandView: View {
     }
 
     private func handlePanelHover(_ isHovering: Bool) {
-        let effectiveHover = (expanded || heightProgress > 0.001 || widthProgress > 0.12) && isHovering
+        let motion = motionCoordinator.snapshot
+        let effectiveHover = (presentationMode == .panel || motion.panelHeightProgress > 0.001 || motion.shellWidthProgress > 0.12) && isHovering
         guard isHoveringPanel != effectiveHover else { return }
         isHoveringPanel = effectiveHover
         debouncedPanelHover(effectiveHover)
@@ -196,7 +186,7 @@ struct IslandView: View {
             }
             capsuleHoverDebounceTask?.cancel()
             capsuleHoverDebounceTask = task
-            DispatchQueue.main.asyncAfter(deadline: .now() + hoverDebounceInterval, execute: task)
+            DispatchQueue.main.asyncAfter(deadline: .now() + IslandMotionTokens.hoverDebounce, execute: task)
         }
     }
 
@@ -212,81 +202,7 @@ struct IslandView: View {
             }
             panelHoverDebounceTask?.cancel()
             panelHoverDebounceTask = task
-            DispatchQueue.main.asyncAfter(deadline: .now() + hoverDebounceInterval, execute: task)
-        }
-    }
-
-    private func syncVisualState(for key: VisualPhaseKey, animated: Bool) {
-        visualStateToken += 1
-        visualTransitionTask?.cancel()
-        visualTransitionTask = nil
-
-        let token = visualStateToken
-        let targetWidth: CGFloat = (key.isLiveActivity || key.isExpanded) ? 1 : 0
-        let targetHeight: CGFloat = key.isExpanded ? 1 : 0
-
-        guard animated else {
-            widthProgress = targetWidth
-            heightProgress = targetHeight
-            return
-        }
-
-        let isExpandingPanel = targetHeight > heightProgress
-        let isCollapsingPanel = targetHeight < heightProgress
-        let isWidthOnlyChange = targetHeight == heightProgress && targetWidth != widthProgress
-
-        if isExpandingPanel {
-            withAnimation(.spring(response: 0.24, dampingFraction: 0.9)) {
-                widthProgress = targetWidth
-            }
-
-            let task = DispatchWorkItem {
-                guard visualStateToken == token else { return }
-                withAnimation(.spring(response: 0.34, dampingFraction: 0.9)) {
-                    heightProgress = targetHeight
-                }
-                visualTransitionTask = nil
-            }
-            visualTransitionTask = task
-            DispatchQueue.main.asyncAfter(deadline: .now() + panelExpandHeightDelay, execute: task)
-            return
-        }
-
-        if isCollapsingPanel {
-            withAnimation(.spring(response: 0.24, dampingFraction: 0.92)) {
-                heightProgress = targetHeight
-            }
-
-            if targetWidth != widthProgress {
-                let task = DispatchWorkItem {
-                    guard visualStateToken == token else { return }
-                    withAnimation(.spring(response: 0.22, dampingFraction: 0.94)) {
-                        widthProgress = targetWidth
-                    }
-                    visualTransitionTask = nil
-                }
-                visualTransitionTask = task
-                DispatchQueue.main.asyncAfter(deadline: .now() + panelCollapseWidthDelay, execute: task)
-            }
-            return
-        }
-
-        if isWidthOnlyChange {
-            if targetWidth > widthProgress {
-                let task = DispatchWorkItem {
-                    guard visualStateToken == token else { return }
-                    withAnimation(.interactiveSpring(response: 0.34, dampingFraction: 0.84, blendDuration: 0.08)) {
-                        widthProgress = targetWidth
-                    }
-                    visualTransitionTask = nil
-                }
-                visualTransitionTask = task
-                DispatchQueue.main.asyncAfter(deadline: .now() + compactExpandWidthDelay, execute: task)
-            } else {
-                withAnimation(.spring(response: 0.2, dampingFraction: 0.94)) {
-                    widthProgress = targetWidth
-                }
-            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + IslandMotionTokens.hoverDebounce, execute: task)
         }
     }
 
@@ -300,18 +216,26 @@ struct IslandView: View {
         return min(max(normalized, 0), 1)
     }
 
+    private func shellMaskShape(isActive: Bool) -> NotchShape {
+        let activityProgress: CGFloat = isActive ? 1 : 0
+        let panelHeightProgress = motionCoordinator.snapshot.panelHeightProgress
+        let compactBottomRadius = interpolate(from: 16, to: 18, progress: activityProgress)
+        let shellBottomRadius = interpolate(from: compactBottomRadius, to: 24, progress: panelHeightProgress)
+        return NotchShape(topRadius: 12, bottomRadius: shellBottomRadius)
+    }
+
     private func unifiedShell(width: CGFloat, height: CGFloat, accent: Color, isActive: Bool) -> some View {
         let activityProgress: CGFloat = isActive ? 1 : 0
-        let compactBottomRadius = interpolate(from: 16, to: 18, progress: activityProgress)
-        let shellBottomRadius = interpolate(from: compactBottomRadius, to: 24, progress: heightProgress)
+        let panelHeightProgress = motionCoordinator.snapshot.panelHeightProgress
+        let panelShellPresence = stagedProgress(panelHeightProgress, start: 0.12, end: 0.72)
         let compactStrokeOpacity = interpolate(from: 0.04, to: 0.06, progress: activityProgress)
-        let shellStrokeOpacity = interpolate(from: compactStrokeOpacity, to: 0.08, progress: heightProgress)
+        let shellStrokeOpacity = interpolate(from: compactStrokeOpacity, to: 0.08, progress: panelShellPresence)
         let compactGlowOpacity = interpolate(from: 0.06, to: 0.14, progress: activityProgress)
-        let glowOpacity = interpolate(from: compactGlowOpacity, to: 0.2, progress: heightProgress)
-        let shellBlur = interpolate(from: 1.2, to: 1.8, progress: heightProgress)
-        let shellShadowRadius = interpolate(from: isActive ? 12 : 10, to: 16, progress: heightProgress)
-        let shellShadowYOffset = interpolate(from: isActive ? 2.5 : 2, to: 4, progress: heightProgress)
-        let shellShape = NotchShape(topRadius: 12, bottomRadius: shellBottomRadius)
+        let glowOpacity = interpolate(from: compactGlowOpacity, to: 0.2, progress: panelShellPresence)
+        let shellBlur = interpolate(from: 1.2, to: 1.8, progress: panelShellPresence)
+        let shellShadowRadius = interpolate(from: isActive ? 12 : 10, to: 16, progress: panelShellPresence)
+        let shellShadowYOffset = interpolate(from: isActive ? 2.5 : 2, to: 4, progress: panelShellPresence)
+        let shellShape = shellMaskShape(isActive: isActive)
 
         return shellShape
             .fill(
@@ -356,7 +280,7 @@ struct IslandView: View {
                         )
                     }
             }
-            .shadow(color: accent.opacity(interpolate(from: 0.02, to: 0.08, progress: activityProgress)), radius: shellShadowRadius, y: shellShadowYOffset)
+            .shadow(color: accent.opacity(interpolate(from: 0.02, to: 0.08, progress: activityProgress) * (0.55 + panelShellPresence * 0.45)), radius: shellShadowRadius, y: shellShadowYOffset)
             .frame(width: width, height: height)
     }
 
@@ -395,7 +319,10 @@ struct IslandView: View {
 
     private func activeCapsuleSummary(_ session: AgentSession, accent: Color) -> some View {
         let showsCompactContextBadge = layout.panelWidth >= 320
-        let panelInfluence = heightProgress
+        let panelInfluence = motionCoordinator.snapshot.panelHeightProgress
+        let contextBadgeExitProgress = stagedProgress(panelInfluence, start: 0.02, end: 0.22)
+        let contextBadgeOpacity = 1 - contextBadgeExitProgress
+        let contextBadgeScale = 1 - contextBadgeExitProgress * 0.06
 
         return ZStack {
             HStack(spacing: 10) {
@@ -406,8 +333,8 @@ struct IslandView: View {
 
                 if showsCompactContextBadge {
                     capsuleContextBadge(session, accent: accent)
-                        .opacity(0.96 + panelInfluence * 0.04)
-                        .scaleEffect(0.985 + panelInfluence * 0.015, anchor: .leading)
+                        .opacity(contextBadgeOpacity)
+                        .scaleEffect(contextBadgeScale, anchor: .leading)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -493,27 +420,34 @@ struct IslandView: View {
         )
     }
 
-    private func expandedContent(_ session: AgentSession, revealProgress: CGFloat) -> some View {
-        let rows = displaySessions
+    private func expandedContent(_ session: AgentSession, panelState: IslandPanelState, revealProgress: CGFloat, bodyRevealProgress: CGFloat) -> some View {
+        let rows = panelState.displaySessions
+        let contentContainerOpacity = bodyRevealProgress
+        let contentContainerOffset = (1 - bodyRevealProgress) * -6
 
         return VStack(spacing: 0) {
-            ScrollView(showsIndicators: isShowingActiveOnly && rows.count > 2) {
-                LazyVStack(spacing: rowSpacing) {
+            ScrollView(showsIndicators: panelState.isShowingActiveOnly && rows.count > 2) {
+                LazyVStack(spacing: panelState.rowSpacing) {
                     ForEach(Array(rows.enumerated()), id: \.element.id) { index, item in
-                        let rowDelay = CGFloat(index) * 0.08
-                        let rowProgress = stagedProgress(revealProgress, start: rowDelay, end: min(1, rowDelay + 0.5))
+                        let rowDelay = CGFloat(index) * 0.06
+                        let rowBaseProgress = stagedProgress(revealProgress, start: rowDelay, end: min(1, rowDelay + 0.42))
+                        let rowProgress = min(rowBaseProgress, bodyRevealProgress)
 
                         sessionRow(item)
                             .opacity(rowProgress)
-                            .offset(y: (1 - rowProgress) * -8)
+                            .offset(y: (1 - rowProgress) * -2)
+                            .scaleEffect(0.996 + rowProgress * 0.004, anchor: .top)
                     }
                 }
-                .padding(.top, expandedListTopPadding)
+                .padding(.top, panelState.topPadding)
                 .padding(.horizontal, panelContentHorizontalInset)
-                .padding(.bottom, expandedBottomPadding)
+                .padding(.bottom, panelState.bottomPadding)
             }
-            .frame(height: expandedScrollHeight + expandedListTopPadding + expandedBottomPadding)
+            .frame(height: panelState.scrollFrameHeight)
         }
+        .opacity(contentContainerOpacity)
+        .offset(y: contentContainerOffset)
+        .clipped()
     }
 
     private func sessionRow(_ session: AgentSession) -> some View {
@@ -559,11 +493,11 @@ struct IslandView: View {
         .padding(10)
         .background(
             RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .fill(.black)
+                .fill(Color(hex: 0x070707, opacity: 0.78))
         )
         .overlay(
             RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .stroke(session.id == selectedSessionID ? session.state.accentColor.opacity(0.72) : Color.white.opacity(0.05), lineWidth: 1)
+                .stroke(session.id == selectedSessionID ? session.state.accentColor.opacity(0.56) : Color.white.opacity(0.03), lineWidth: 1)
         )
         .overlay(alignment: .leading) {
             Rectangle()
